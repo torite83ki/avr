@@ -1,0 +1,398 @@
+/*
+ *  avr_main.c
+ *  device = ATmega88
+ *
+ *  used interrupts
+ *  TIM0
+ *  
+ *  coded by H.Takenobu
+ *  2011.04.16 rev.0
+ *
+ */
+
+
+#include "m88def.h"
+#include "avr.h"
+#include "avr_main.h"
+/* 
+ * user defined constant
+ */
+#define BLINK_T 50 		// LED Blink cycle 0.5sec
+#define BLINK_TEST 100		// LCD Blink cycle
+#define SW_INPUT_T 3		// Switch input cycle
+#define TICK_60s 600		// 60s count
+
+#define SW_ALL_IN     0x18	// 0001 l000 
+#define ALL_OFF_OUT	0x00	// 0000 0000
+#define ALL_OFF_OUT_B	0x7f	// 0111 1111
+#define	ALL_OFF_OUT_C	0x00	// 0000 0000
+#define ALL_OFF_OUT_D	0x7f	// 0111 1111
+/*
+ * user defined functions
+ */
+#define INIT 	0x00
+#define SLEEP	0x01
+#define RISE	0x02
+#define ACTIVE	0x04
+
+#define SW01			0x01
+#define SW02			0x02
+#define SW03			0x03
+#define SW04			0x00
+#define SW_SHIFT_ALIGNED	0x03
+#define SW_ALL_OFF		0x00
+
+#define LED_ON	0xfb		// 1111 1011
+#define LED_OFF 0xff		// 1111 1111
+
+#define INTERVAL_00	0	//  0sec
+#define INTERVAL_01	300	//  3sec
+#define INTERVAL_02	1000	// 10sec
+#define INTERVAL_03	6000	// 60sec
+//#define INTERVAL_04	60000	// 60sec
+#define INTERVAL_10	1	//  1min
+#define INTERVAL_20	5	//  5min
+#define	INTERVAL_30	10	// 10min
+#define INTERVAL_40	60	// 60min
+
+/*
+ * interrupt handlers
+ */
+extern void int_RESET(void) NAKED;
+void int_TIM0_OVF(void) SIGNAL_INT;
+
+/*
+ * sub routines
+ */
+
+void init_interrupt_cpumode(void) NAKED;
+void init_timer(void) NAKED;
+void init_port(void) NAKED;
+void init_parameter(void) NAKED;
+
+
+extern void delay(word);
+void blink_led(byte, word);
+
+byte read_port(byte*);
+void read_sw(void);
+void set_mode(byte *, byte);
+void set_shutter_cycle(void);
+void reset_shutter_count(void);
+void pset(byte, byte);
+void clear(void);
+
+
+/*
+ * sram static values
+ */
+word sys_clk1;			/* main system clock : 10ms */
+static word sys_cyc_60s;	/* increment by 1min */
+static word sys_clk2;		/* sub system clock : 1min */
+
+
+static byte state;
+
+static word shutter_cyc1;	/* shutter cycle1 */
+
+static word shutter_count1;
+
+//static byte output_data;	/* output data for pio */
+static char sw_in;		/* switch input */
+static char sw_in_pre;		/* pre switch input */
+
+/* .eeprom section data */
+// no data
+
+/* .text section data */
+//extern byte test_data[];	/* allocate to the other place */ 
+
+
+
+/* main routine for avr */
+void app_main(void){
+
+	init_interrupt_cpumode();
+	init_timer();
+	init_port();
+	init_parameter();
+
+
+	/* test routine */
+	io_register(PORTB) = 0x00;
+	io_register(PORTC) = 0x1f;
+	io_register(PORTD) = 0x00;
+
+//	pset(0,0);
+//	delay(100);
+//	pset(5,0);
+//	delay(100);
+
+
+
+	/* enable interrupt */
+//	sei();
+
+	/* initial led flash */
+//	blink_led(10,5);
+//	io_register(PORTB) = ALL_OFF_OUT;
+	delay(100);
+	
+	/* main loop */
+	state = SLEEP;
+
+	while(1){
+		
+		/* read sw input */
+//		read_sw();
+
+		/* set the status */
+//		set_mode(&state, sw_in);
+
+		/* load the shutter cycle */
+//		if( (state & RISE ) == RISE) {
+//			set_shutter_cycle();
+//			reset_shutter_count();
+//		}
+
+
+		/* sub system clock */
+//		if (sys_clk1 == sys_cyc_60s){
+//			sys_cyc_60s = sys_clk1 + TICK_60s;
+//			sys_clk2++;
+//		}
+
+//		if (sys_clk1 == sys_cyc_60s){
+//			nop();
+//			sys_cyc_60s = sys_clk1 + TICK_60s;
+//			sys_clk2++;
+//		}
+
+
+
+		/* led blink */
+//		if ( state == SLEEP) {
+//			blink_led(1,50);
+//		} else {
+//			blink_led(1,5);
+//		}
+
+
+		/* shoot !!*/
+//		if ((sys_clk1 >= shutter_count1) && ((state & ACTIVE) == ACTIVE)) {
+//			shutter_count1 = sys_clk1 + shutter_cyc1;
+//				//shoot();
+//		}
+	}
+	/* end of main routine */
+}
+/* follows are Sub routine */
+
+ 
+void init_interrupt_cpumode(void)  {
+	cli();
+	io_register(MCUCR) = NULL;			/* selected the Interrupt Vector */
+	io_register(SPH) = (RAMEND & 0xff00) >> 0x0f;	/* set the Stack Pointer */
+	io_register(SPL) = (RAMEND & 0x0ff);
+	io_register(EIMSK) = NULL;			/* disabled External Int. */
+}
+
+
+
+#define CLK_PR 0x00		// clock prescalse register
+#define CLK_PE 0x80		// clock prescalse change enable
+#define T0_OVF -9		// Timer 0 overflow value -> 10mS
+void init_timer(void)  {
+	/* default clock used */
+	/* internal RC oscillator at 8.0 MHz */
+	/* with the fuse CKDIV8 programmed */
+	/* this means, resulting in 1.0 MHz system clock :-) */
+
+	/* clock prescaler initialize */
+	io_register(CLKPR)  = CLK_PE;
+	io_register(CLKPR)  = CLK_PR;
+	io_register(TCCR0A) = NULL;
+	io_register(TCCR0B) = (1 << CS02) && (1 << CS00);	/* set prescaler 1/1024 */
+	io_register(TCNT0)  = T0_OVF;		/* set Overflow count */
+	/* set Timer Overflow Interrupt Enable */
+	io_register(TIMSK0) = (1 << TOIE0);
+}
+
+#define PB_OM  0x7f		// 0111 1111 Port B output bit mask
+#define PB_PULLUP 0x80		// 1000 0000 Port B input pull-up bit and 
+				// 	     Port B source output
+#define PC_OM  0x1f		// 0001 1111 Port C output bit mask
+#define PC_PULLUP 0x20		// 0010 0000 Port C input pull-up bit and 
+				// 	     Port C source output
+#define PD_OM  0x7f		// 0111 1111 Port D output bit mask
+#define PD_PULLUP 0x80		// 1000 0000 Port D input pull-up bit and 
+				// 	     Port D source output
+void init_port(void) {
+	io_register(DDRB)  = PB_OM;
+	io_register(PORTB) = PB_PULLUP;
+	nop();
+	io_register(DDRC)  = PC_OM;
+	io_register(PORTC) = PC_PULLUP;
+	nop();
+	io_register(DDRD)  = PD_OM;
+	io_register(PORTD) = PD_PULLUP;
+	nop();
+}
+
+void init_parameter(void) {
+	state = INIT;
+	shutter_count1 = sys_clk1 + shutter_cyc1;
+	sys_cyc_60s = sys_clk1 + TICK_60s;
+	shutter_cyc1   = INTERVAL_00;
+	shutter_count1 = INTERVAL_02;
+	io_register(PORTB) = ALL_OFF_OUT;
+	io_register(PORTC) = ALL_OFF_OUT;
+	io_register(PORTD) = ALL_OFF_OUT;
+}	
+
+
+void blink_led(byte count ,word time){
+	byte m,n;
+	m = 0x00;
+	n = io_register(PORTB);
+	io_register(PORTB) = ALL_OFF_OUT_B;
+	io_register(PORTC) = ALL_OFF_OUT_C;
+	io_register(PORTD) = ALL_OFF_OUT_D;
+	while(1){
+		if(m >= count)
+			break;
+		//io_register(PORTB) = (LED_ON & ALL_OFF_OUT) & PB_OM;
+		delay(time);
+		//io_register(PORTB) = (LED_OFF & ALL_OFF_OUT) & PB_OM;
+		delay(time);
+		m++;
+	}
+	//io_register(PORTB) = n;
+}
+
+
+byte read_port(byte *port_address){
+	return io_register(port_address);
+}
+
+void write_port(byte *port_address, byte data) {
+	io_register(port_address) = data;
+}
+
+void read_sw(void) {
+	byte sw_input;
+	sw_input = read_port((byte*)PINB);
+	sw_in = (sw_in & SW_ALL_IN) >> SW_SHIFT_ALIGNED;
+	if( sw_input == sw_in_pre) {
+		sw_in = sw_input;
+	}
+	sw_in_pre = sw_input;
+}
+
+void set_mode(byte *mode_status, byte switch_data) {
+	if( switch_data != SW_ALL_OFF ) {
+		if( *mode_status == SLEEP ) {
+			*mode_status |= RISE;	/* Rise flag set one cycle */
+		} else {
+			*mode_status &= ~RISE;
+			*mode_status |= ACTIVE;
+		}
+	} else {
+		*mode_status = SLEEP;
+	}
+}
+
+void set_shutter_cycle(void) {
+	switch(sw_in) {
+		case SW01:
+			shutter_cyc1 = INTERVAL_01;
+			break;
+		case SW02:
+			shutter_cyc1 = INTERVAL_02;
+			break;
+		case SW03:
+			shutter_cyc1 = INTERVAL_03;
+			break;
+		case SW04:
+			shutter_cyc1 = INTERVAL_03;
+			break;
+		default:
+			shutter_cyc1 = INTERVAL_01;
+	}
+}
+
+void reset_shutter_count(void) {
+	/* reset the counter */
+	if ((state & RISE) == RISE) {
+		shutter_count1 = sys_clk1 + shutter_cyc1;
+	}
+}
+
+void pset0(byte x, byte y) {
+	/* set point on led matrix No.0 */
+	io_register(PORTB) = ~(1 << y);
+	io_register(PORTC) = 1 << x;
+	io_register(PORTD) = ALL_OFF_OUT_D;
+}
+
+void pset1(byte x, byte y) {
+	/* set point on led matrix No.1 */
+	io_register(PORTB) = ALL_OFF_OUT_B;
+	if( x < 5)
+		x = 5;
+	io_register(PORTC) = 1 << (x - 5);
+	io_register(PORTD) = ~(1 << y);;
+}
+
+void pset(byte x, byte y) {
+	/* set point on led matrix array */
+	if(x < 5) {
+		pset0(x, y);
+	} else {
+		pset1(x, y);
+	}
+}
+
+void clear(void) {
+	io_register(PORTB) = ALL_OFF_OUT_B;
+	io_register(PORTC) = ALL_OFF_OUT_C;
+	io_register(PORTD) = ALL_OFF_OUT_D;
+}
+
+
+/* interrupt handlers */
+void int_TIM0_OVF(void){
+	io_register(TCNT0) = T0_OVF; /* set Overflow count */
+	sys_clk1++;
+}
+
+/* no use */
+/*
+void int_EE_RDY(void){
+	asm("rjmp RESET");
+}
+void int_INT0(void){
+	asm("rjmp RESET");
+}
+void int_PCINT1(void){
+	asm("rjmp RESET");
+}
+void int_EE_RDY(void){
+	asm("rjmp RESET");
+}
+void int_ANA_COMP(void){
+	asm("rjmp RESET");
+}
+void int_TIM0_COMPA(void){
+	asm("rjmp RESET");
+}
+void int_TIM0_COMPB(void){
+	asm("rjmp RESET");
+}
+void int_WDT(void){
+	asm("rjmp RESET");
+}
+void int_ADC(void){
+	asm("rjmp RESET");
+}
+*/

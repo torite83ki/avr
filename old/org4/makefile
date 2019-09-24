@@ -1,0 +1,65 @@
+main = avr_main.c
+mmcu_header = 2313def.h
+headers = avr.h
+mmcu = at90s2313
+stack = 0xdf
+
+object = crt.o avr_main.o read_byte_eeprom.o putc.o avr_func.o wait.o lcd_lib.o
+
+avr_main.hex	: avr_main.elf avr_main.eep
+	objcopy-avr -j .text -j .data -O ihex avr_main.elf avr_main.hex
+
+avr_main.elf	: $(object)
+	ld-avr -o avr_main.elf  -T gcc_elf.ls $(object)
+
+avr_main.o	: $(main) $(mmcu_header) $(headers)
+	gcc-avr -Wall -nostartfiles -c $(main) -o avr_main.o -mmcu=$(mmcu) -minit-stack=$(stack)
+
+crt.o	: crt.S $(mmcu_header) $(headers)
+	gcc-avr -Wall -c crt.S -mmcu=$(mmcu) -minit-stack=$(stack)
+
+avr_func.o	: avr_func.c $(mmcu_header) $(headers) avr_func.h
+	gcc-avr -Wall -c avr_func.c -mmcu=$(mmcu) -minit-stack=$(stack)
+
+putc.o	: putc.S $(mmcu_header) $(headers)
+	gcc-avr -Wall -c putc.S -mmcu=$(mmcu) -minit-stack=$(stack)
+
+wait.o	: wait.S $(mmcu_header) $(headers)
+	gcc-avr -Wall -c wait.S -mmcu=$(mmcu) -minit-stack=$(stack)
+
+puts_avr.o	: puts_avr.c $(headers)
+	gcc-avr -Wall -c puts_avr.c -mmcu=$(mmcu) -minit-stack=$(stack)
+
+read_byte_eeprom.o	: read_byte_eeprom.S $(headers)
+	gcc-avr -Wall -c read_byte_eeprom.S -mmcu=$(mmcu) -minit-stack=$(stack)
+
+lcd_lib.o	: lcd_lib.c $(mmcu_header) $(headers) avr_lcd.h
+	gcc-avr -Wall -c lcd_lib.c -mmcu=$(mmcu) -minit-stack=$(stack)
+
+avr_main.eep	: avr_main.elf
+	objcopy-avr -j .eeprom --change-section-lma .eeprom=0 -O ihex avr_main.elf avr_main.eep
+
+clean	:
+	rm -f *.o
+	rm -f *.hex
+	rm -f *.elf
+	rm -f *.eep
+	rm -f *.map
+	rm -f *.out
+
+e	: 
+	sudo /home/tak5tak/prog/avr/ewr/avrsp -pl1 -e
+
+w	:
+	sudo /home/tak5tak/prog/avr/ewr/avrsp -pl1 avr_main.hex avr_main.eep
+
+we	:
+	sudo /home/tak5tak/prog/avr/ewr/avrsp -pl1 avr_main.eep
+
+sig	:
+	sudo /home/tak5tak/prog/avr/ewr/avrsp -pl1 -r
+rp	:
+	sudo /home/tak5tak/prog/avr/ewr/avrsp -pl1 -rp
+re	:
+	sudo /home/tak5tak/prog/avr/ewr/avrsp -pl1 -re
+

@@ -1,0 +1,734 @@
+/*
+ *  avr_main.c
+ *  device = ATmega88
+ *
+ *  used interrupts
+ *  TIM0
+ *  
+ *  coded by H.Takenobu
+ *  2011.04.16 rev.0
+ *
+ */
+
+
+#include "m88def.h"
+#include "avr.h"
+#include "avr_main.h"
+/* 
+ * user defined constant
+ */
+#define BLINK_T 50 		// LED Blink cycle 0.5sec
+#define SW_INPUT_T 3		// Switch input cycle
+#define TICK_60s 600		// 60s count
+
+#define SW_ALL_IN     0x18	// 0001 l000 
+#define ALL_OFF_OUT	0x00	// 0000 0000
+#define ALL_OFF_OUT_B	0x7f	// 0111 1111
+#define	ALL_OFF_OUT_C	0x00	// 0000 0000
+#define ALL_OFF_OUT_D	0x7f	// 0111 1111
+/*
+ * user defined functions
+ */
+#define INIT 	0x00
+#define SLEEP	0x01
+#define RISE	0x02
+#define ACTIVE	0x04
+
+#define SW01			0x01
+#define SW02			0x02
+#define SW03			0x03
+#define SW04			0x00
+#define SW_SHIFT_ALIGNED	0x03
+#define SW_ALL_OFF		0x00
+
+typedef volatile struct user_timer_status_bitset {
+	word run 		: 1;		// timer running flag			r/w
+	word reserve0		: 1;		// reserve  flag			r/w
+	word countup		: 1;		// timer countup flag			r/w
+	word reserve1		: 5;		// reserve area
+	word auto_restart	: 1;		// timer auto restart flag		r/w
+	word reserve2		: 7;		// reserve area
+} User_Timer_Status_Bitset;
+
+typedef volatile union user_timer_status {
+	User_Timer_Status_Bitset bitset;
+	word flags;
+} User_Timer_Status;
+
+typedef volatile struct user_timer_element {
+	User_Timer_Status status;
+	word count;
+	word set_value;
+} User_Timer_Element;
+
+enum user_timer_number {UTIM0, UTIM1, UTIM2, UTIM3, UTIM4};
+#define MAX_USER_TIMER_NUMBER	(UTIM4 + 1)	// Timer_Element number
+#define UTIM_RUN	0
+#define UTIM_CNTUP	2
+#define UTIM_AUTOSTART	8
+
+#define UTIM_RETVAL_RUN		1
+#define UTIM_RETVAL_STOP	0
+#define UTIM_RETVAL_NG		0
+#define UTIM_RETVAL_OK		1	
+
+
+
+typedef volatile struct led_map{
+	byte col[5];
+} Led_Map;
+enum led_matrix_number {LED_OFF, LED0, LED1, LED_ALL};
+enum led_matrix_number_half {LED_OFF_HALF, LED0_HALF, LED1_HALF, LED2_HALF, LED3_HALF, LED_ALL_HALF};
+#define Led_Null	0
+#define Led_Left	1
+#define Led_Right	2
+
+typedef volatile struct led_map_half{
+	byte col[2];
+} Led_Map_Half; 
+
+
+
+#define LED_MATRIX_NUM	2
+typedef volatile struct led_matrix{
+	byte 	num;
+	Led_Map	member[LED_MATRIX_NUM];
+}Led_Matrix;
+
+
+
+/*
+ * interrupt handlers
+ */
+extern void int_RESET(void) NAKED;
+void int_TIM0_OVF(void) SIGNAL_INT;
+
+/*
+ * sub routines
+ */
+
+void init_timer(void) NAKED;
+void init_port(void) NAKED;
+void init_parameter(void) NAKED;
+
+extern void delay(word);
+
+byte start_utimer(word utim_num);
+byte stop_utimer(word utim_num);
+byte restart_utimer(word utim_num);
+byte set_utimer(word utim_num, word set_count);
+byte check_running_utimer(word utim_num);
+byte set_autostart_utimer(word utim_num);
+byte reset_autostart_utimer(word utim_num);
+void count_utimer(void);
+void read_utimer(word utim_num);
+
+void pset(byte, byte);
+void clear(void);
+void put_led_map(Led_Map *, byte);
+void copy_led_map(Led_Map *Source_data, Led_Map *Distination_data);
+void scan_led_matrix(Led_Matrix *);
+void read_eeprom_led_map(Led_Map *, Led_Map *);
+
+void put_number(int); 
+void flow_dot(word utim_num);
+
+void EEPROM_write(word, byte);
+byte EEPROM_read(word); 
+
+
+/*
+ * sram static values
+ */
+volatile word sys_clk0;
+volatile word sys_clk1;			/* main system clock : 10ms */
+static byte state;
+word nw_count;
+
+User_Timer_Element utim_table[MAX_USER_TIMER_NUMBER];
+Led_Matrix drawing_data;
+Led_Matrix drawing_data2;
+Led_Map_Half num_table[10];
+
+/* .eeprom section data */
+// no data
+Led_Map led_number_table[] EEPROM  = {	{0x1f,0x04,0x04,0x1f,0x00},\
+				{0x1f,0x15,0x15,0x15,0x00},\
+				{0x1f,0x10,0x10,0x10,0x00},\
+				{0x1f,0x10,0x10,0x10,0x00},\
+				{0x1f,0x11,0x11,0x1f,0x00},\
+				{0x00,0x00,0x10,0x30,0x00},\
+				{0x0f,0x18,0x0c,0x1c,0x0f},\
+				{0x1f,0x11,0x11,0x1f,0x00},\
+				{0x1f,0x05,0x05,0x1a,0x00},\
+				{0x1f,0x10,0x10,0x10,0x00},\
+				{0x1f,0x11,0x11,0x0e,0x00},\
+				{0x00,0x17,0x00,0x17,0x00} };
+
+
+Led_Map led_bit_pic_table[] EEPROM = {	{0x44,0x2a,0x11,0x2a,0x44},\
+					{0x55,0x2a,0x55,0x2a,0x55},\
+					{0x08,0x08,0x3e,0x08,0x08},\
+					{0x22,0x14,0x08,0x14,0x22}};
+
+Led_Map led_bit_pic_table2[] EEPROM = { {0x7f,0x41,0x41,0x41,0x41},\
+					{0x41,0x41,0x41,0x41,0x7f},\
+					{0x00,0x3e,0x22,0x22,0x22},\
+					{0x22,0x22,0x22,0x3e,0x00},\
+					{0x00,0x00,0x1c,0x14,0x14},\
+					{0x14,0x14,0x1c,0x00,0x00},\
+					{0x00,0x00,0x00,0x08,0x08},\
+					{0x08,0x08,0x00,0x00,0x00},\
+					{0x00,0x00,0x00,0x00,0x08},\
+					{0x08,0x00,0x00,0x00,0x00}};
+
+Led_Map led_bit_pic_smile[] EEPROM = { 	{0x10,0x20,0x46,0x40,0x40},\
+					{0x40,0x46,0x20,0x10,0x00}};
+
+Led_Map led_bit_pic_smile2[] EEPROM = {	{0x08,0x10,0x26,0x20,0x20},\
+					{0x20,0x26,0x10,0x08,0x00}};
+
+byte led_test_bit[] EEPROM = {	0x1,0x2,0x3,0x4,0x5,0x6,0x7,0x8,0x9,0xa,0xb,0xc,0xd,0xe,0xf};
+byte led_test_bit2[32] EEPROM;
+
+Led_Map_Half led_bit_half_number[] EEPROM = {	{0x1e,0x1e}, {0x02,0x1f}, {0x1d,0x17},{0x15,0x1f},\
+						{0x0e,0x19}, {0x17,0x1d}, {0x1f,0x1d},{0x19,0x07},\
+						{0x1b,0x1b}, {0x17,0x1f}};
+
+
+/* .text section data */
+
+
+/* main routine for avr */
+void app_main(void){
+	
+	
+	
+	
+	cli();
+	io_register(SPH) 	= (RAMEND & 0xff00) >> 8;	/* set the Stack Pointer */
+	io_register(SPL) 	= (RAMEND & 0x0ff);
+
+	/* linker test */
+	volatile static char linkertestbuf[] = {0x30,0x31,0x32,0x33,0x34,0x35};
+	
+	
+	init_timer();
+	init_port();
+	init_parameter();
+	
+	/* enable interrupt */
+	sei();
+
+	volatile byte ret_val;	
+
+	ret_val = set_utimer(UTIM0, 100);
+	ret_val = set_utimer(UTIM1, 50);
+	ret_val = set_utimer(UTIM2, 50);
+	ret_val = set_utimer(UTIM3, 100);
+	ret_val = set_utimer(UTIM4, 50);
+
+	drawing_data.member[0].col[0] = EEPROM_read((word) &led_bit_pic_smile[0].col[0]);
+	drawing_data.member[0].col[1] = EEPROM_read((word) &led_bit_pic_smile[0].col[1]);
+	drawing_data.member[0].col[2] = EEPROM_read((word) &led_bit_pic_smile[0].col[2]);
+	drawing_data.member[0].col[3] = EEPROM_read((word) &led_bit_pic_smile[0].col[3]); 
+	drawing_data.member[0].col[4] = EEPROM_read((word) &led_bit_pic_smile[0].col[4]);
+	drawing_data.member[1].col[0] = EEPROM_read((word) &led_bit_pic_smile[1].col[0]);
+	drawing_data.member[1].col[1] = EEPROM_read((word) &led_bit_pic_smile[1].col[1]);
+	drawing_data.member[1].col[2] = EEPROM_read((word) &led_bit_pic_smile[1].col[2]);
+	drawing_data.member[1].col[3] = EEPROM_read((word) &led_bit_pic_smile[1].col[3]); 
+	drawing_data.member[1].col[4] = EEPROM_read((word) &led_bit_pic_smile[1].col[4]);
+	drawing_data.num = LED_ALL;
+
+	drawing_data2.member[0].col[0] = EEPROM_read((word) &led_bit_pic_smile2[0].col[0]);
+	drawing_data2.member[0].col[1] = EEPROM_read((word) &led_bit_pic_smile2[0].col[1]);
+	drawing_data2.member[0].col[2] = EEPROM_read((word) &led_bit_pic_smile2[0].col[2]);
+	drawing_data2.member[0].col[3] = EEPROM_read((word) &led_bit_pic_smile2[0].col[3]);
+	drawing_data2.member[0].col[4] = EEPROM_read((word) &led_bit_pic_smile2[0].col[4]);
+	drawing_data2.member[1].col[0] = EEPROM_read((word) &led_bit_pic_smile2[1].col[0]);
+	drawing_data2.member[1].col[1] = EEPROM_read((word) &led_bit_pic_smile2[1].col[1]);
+	drawing_data2.member[1].col[2] = EEPROM_read((word) &led_bit_pic_smile2[1].col[2]);
+	drawing_data2.member[1].col[3] = EEPROM_read((word) &led_bit_pic_smile2[1].col[3]);
+	drawing_data2.member[1].col[4] = EEPROM_read((word) &led_bit_pic_smile2[1].col[4]);
+	drawing_data2.num = LED_ALL;
+
+//	num_table[0].col[0] = EEPROM_read((word) &led_bit_half_number[0].col[0]); 
+//	num_table[0].col[1] = EEPROM_read((word) &led_bit_half_number[0].col[1]); 
+//	num_table[1].col[0] = EEPROM_read((word) &led_bit_half_number[1].col[0]); 
+//	num_table[1].col[1] = EEPROM_read((word) &led_bit_half_number[1].col[1]); 
+//	num_table[2].col[0] = EEPROM_read((word) &led_bit_half_number[2].col[0]); 
+//	num_table[2].col[1] = EEPROM_read((word) &led_bit_half_number[2].col[1]); 
+//	num_table[3].col[0] = EEPROM_read((word) &led_bit_half_number[3].col[0]); 
+//	num_table[3].col[1] = EEPROM_read((word) &led_bit_half_number[3].col[1]); 
+//	num_table[4].col[0] = EEPROM_read((word) &led_bit_half_number[4].col[0]); 
+//	num_table[4].col[1] = EEPROM_read((word) &led_bit_half_number[4].col[1]); 
+	
+//	num_table[5].col[0] = EEPROM_read((word) &led_bit_half_number[5].col[0]); 
+//	num_table[5].col[1] = EEPROM_read((word) &led_bit_half_number[5].col[1]); 
+//	num_table[6].col[0] = EEPROM_read((word) &led_bit_half_number[6].col[0]); 
+//	num_table[6].col[1] = EEPROM_read((word) &led_bit_half_number[6].col[1]); 
+//	num_table[7].col[0] = EEPROM_read((word) &led_bit_half_number[7].col[0]); 
+//	num_table[7].col[1] = EEPROM_read((word) &led_bit_half_number[7].col[1]); 
+//	num_table[8].col[0] = EEPROM_read((word) &led_bit_half_number[8].col[0]); 
+//	num_table[8].col[1] = EEPROM_read((word) &led_bit_half_number[8].col[1]); 
+//	num_table[9].col[0] = EEPROM_read((word) &led_bit_half_number[9].col[0]); 
+//	num_table[9].col[1] = EEPROM_read((word) &led_bit_half_number[9].col[1]); 
+
+	int ddd;
+	for(ddd = 0; ddd < 10; ddd++) {
+		num_table[ddd].col[0] = EEPROM_read((word) &led_bit_half_number[ddd].col[0]);
+		num_table[ddd].col[1] = EEPROM_read((word) &led_bit_half_number[ddd].col[1]);
+	}
+
+	nop();
+	nop();
+	nop();
+	nop();
+	nop();
+	nop();
+
+	volatile byte test_data_tak = 0xaa;
+	test_data_tak = test_data_tak + 0x01;
+
+	while(1) {
+		test_data_tak ++;
+		ret_val = start_utimer(UTIM2);
+		do {
+			put_led_map_half(&num_table[0], LED0_HALF);
+		} while (check_running_utimer(UTIM2)); 
+		ret_val = start_utimer(UTIM2);
+		do {
+			put_led_map_half(&num_table[1], LED0_HALF); 
+		} while (check_running_utimer(UTIM2)); 
+		ret_val = start_utimer(UTIM2);
+		do {
+			put_led_map_half(&num_table[2], LED0_HALF); 
+		} while (check_running_utimer(UTIM2)); 
+		ret_val = start_utimer(UTIM2);
+		do {
+			put_led_map_half(&num_table[3], LED0_HALF); 
+		} while (check_running_utimer(UTIM2)); 
+	
+		int cnt_loop;
+		for(cnt_loop = 0; cnt_loop < 10; cnt_loop++) {
+			ret_val = start_utimer(UTIM2);
+			do {
+				put_led_map_half(&num_table[cnt_loop], LED0_HALF); 
+				put_led_map_half(&num_table[cnt_loop], LED1_HALF); 
+				put_led_map_half(&num_table[cnt_loop], LED2_HALF); 
+				put_led_map_half(&num_table[cnt_loop], LED3_HALF); 
+			} while (check_running_utimer(UTIM2));
+		}
+
+
+
+	}	
+	/* end of main routine */
+}
+/* follows are Sub routine */
+
+#define CLK_PR 0x00		// clock prescalse register
+#define CLK_PE 0x80		// clock prescalse change enable
+#define T0_OVF -9		// Timer 0 overflow value -> 10mS
+void init_timer(void)  {
+	/* default clock used */
+	/* internal RC oscillator at 8.0 MHz */
+	/* with the fuse CKDIV8 programmed */
+	/* this means, resulting in 1.0 MHz system clock :-) */
+
+	/* clock prescaler initialize */
+	io_register(CLKPR)  = CLK_PE;
+	io_register(CLKPR)  = CLK_PR;
+	io_register(TCCR0A) = NULL;
+	io_register(TCCR0B) = (1 << CS02) | (1 << CS00);	/* set prescaler 1/1024 */
+	io_register(TCNT0)  = T0_OVF;				/* set Overflow count */
+	/* set Timer Overflow Interrupt Enable */
+	io_register(TIMSK0) = (1 << TOIE0);
+	ret();
+}
+
+#define PB_OM  0x7f		// 0111 1111 Port B output bit mask
+#define PB_PULLUP 0x80		// 1000 0000 Port B input pull-up bit and 
+				// 	     Port B source output
+#define PC_OM  0x1f		// 0001 1111 Port C output bit mask
+#define PC_PULLUP 0x3f		// 0011 1111 Port C input pull-up bit and 
+				// 	     Port C source output
+#define PD_OM  0x7f		// 0111 1111 Port D output bit mask
+#define PD_PULLUP 0x80		// 1000 0000 Port D input pull-up bit and 
+// 	     Port D source output
+void init_port(void) {
+	io_register(DDRB)  = PB_OM;
+	io_register(PORTB) = PB_PULLUP;
+	nop();
+	io_register(DDRC)  = PC_OM;
+	io_register(PORTC) = PC_PULLUP;
+	nop();
+	io_register(DDRD)  = PD_OM;
+	io_register(PORTD) = PD_PULLUP;
+	nop();
+	ret();
+}
+
+void init_parameter(void) {
+	state = INIT;
+	sys_clk0 = 0;
+	sys_clk1 = 0;
+	io_register(PORTB) = ALL_OFF_OUT;
+	io_register(PORTC) = ALL_OFF_OUT;
+	io_register(PORTD) = ALL_OFF_OUT;
+	ret();
+}	
+
+byte start_utimer(word utim_num) {
+	if((utim_num < 0) || (utim_num >= MAX_USER_TIMER_NUMBER)) {
+		return UTIM_RETVAL_NG;
+	}
+	cli();
+	volatile User_Timer_Element *utim_ptr;
+	utim_ptr = &utim_table[utim_num];
+	utim_ptr->count = (utim_ptr->set_value + sys_clk0) & 0x7fff;
+	utim_ptr->status.flags |= (1 << UTIM_RUN);
+	sei();	
+	return UTIM_RETVAL_OK;
+}
+
+byte stop_utimer(word utim_num){
+	if((utim_num < 0) || (utim_num >= MAX_USER_TIMER_NUMBER)) {
+		return UTIM_RETVAL_NG;
+	}
+	volatile User_Timer_Element *utim_ptr;
+	utim_ptr = &utim_table[utim_num];
+	utim_ptr->status.flags &= ~((1 << UTIM_RUN) | (1 << UTIM_CNTUP));
+	return UTIM_RETVAL_OK;
+}
+
+byte restart_utimer(word utim_num){
+	if((utim_num < 0) || (utim_num >= MAX_USER_TIMER_NUMBER)) {
+		return UTIM_RETVAL_NG;
+	}
+	volatile User_Timer_Element *utim_ptr;
+	utim_ptr = &utim_table[utim_num];
+	utim_ptr->count = (utim_ptr->set_value + sys_clk0) & 0x7fff;
+	utim_ptr->status.flags |= (1 << UTIM_RUN);
+	return UTIM_RETVAL_OK;
+}
+
+byte set_utimer(word utim_num, word set_count) {
+	if((utim_num < 0) || (utim_num >= MAX_USER_TIMER_NUMBER) || ( set_count < 0)) {
+		return UTIM_RETVAL_NG;
+	}
+	volatile User_Timer_Element *utim_ptr;
+	utim_ptr = &utim_table[utim_num];
+	utim_ptr->set_value = set_count;
+	return UTIM_RETVAL_OK;
+}
+
+byte check_running_utimer(word utim_num) {
+	if((utim_num < 0) || (utim_num >= MAX_USER_TIMER_NUMBER)) {
+		return UTIM_RETVAL_NG;	// not assigned
+	}
+	volatile User_Timer_Element *utim_ptr;
+	utim_ptr = &utim_table[utim_num];
+
+	if( utim_ptr->status.flags & (1 << UTIM_RUN)) {
+		return UTIM_RETVAL_RUN;		// user timer is runnnig
+	} else {
+		return UTIM_RETVAL_STOP;	// user timer was stoped
+	}
+}
+
+byte set_autostart_utimer(word utim_num) {
+	if((utim_num < 0) || (utim_num >= MAX_USER_TIMER_NUMBER)) {
+		return UTIM_RETVAL_NG;
+	}
+	volatile User_Timer_Element *utim_ptr;
+	utim_ptr = &utim_table[utim_num];
+	utim_ptr->status.flags |= (1 << UTIM_AUTOSTART);
+	return UTIM_RETVAL_OK;
+}
+
+byte reset_autostart_utimer(word utim_num) {
+	if((utim_num < 0) || (utim_num >= MAX_USER_TIMER_NUMBER)) {
+		return UTIM_RETVAL_NG;
+	}
+	volatile User_Timer_Element *utim_ptr;
+	utim_ptr = &utim_table[utim_num];
+	utim_ptr->status.flags &= ~(1 << UTIM_AUTOSTART);
+	return UTIM_RETVAL_OK;
+}
+
+void count_utimer(void) {
+ 	volatile User_Timer_Element *utim_ptr;
+	word utim_num;
+	for(utim_num = 0; utim_num < MAX_USER_TIMER_NUMBER; utim_num++) {
+		utim_ptr = &utim_table[utim_num];
+		if(utim_ptr->status.flags & (1 << UTIM_RUN)) {
+			/* timer countup */
+			if(utim_ptr->count == sys_clk0) {
+				utim_ptr->status.flags |= (1 << UTIM_CNTUP);
+				if(utim_ptr->status.flags & (1 << UTIM_AUTOSTART)) {
+					restart_utimer(utim_num);
+				} else {
+					stop_utimer(utim_num);
+				}
+			}
+		}
+	}
+}
+
+void pset0(byte x, byte y) {
+	/* set point on led matrix No.0 */
+	io_register(PORTB) = ALL_OFF_OUT_B;
+	io_register(PORTC) = 1 << x;
+	io_register(PORTD) = ~(1 << y);
+	byte dead_time = 0;
+	do {
+		dead_time++;
+	} while (dead_time < 30);
+	io_register(PORTD) = ALL_OFF_OUT_D;
+}
+
+void pset1(byte x, byte y) {
+	/* set point on led matrix No.1 */
+	io_register(PORTB) = ~(1 << y);
+	if( x < 5 ) {
+		x = 5;
+	}
+	io_register(PORTC) = 1 << (x - 5);
+	io_register(PORTD) = ALL_OFF_OUT_D;
+	byte dead_time = 0;
+	do {
+		dead_time++;
+	} while (dead_time < 30);
+	io_register(PORTB) = ALL_OFF_OUT_B;
+}
+
+void pset(byte x, byte y) {
+	/* set point on led matrix array */
+	if( x < 5 ) {
+		pset0(x, y);
+	} else {
+		pset1(x, y);
+	}
+}
+
+void clear(void) {
+	io_register(PORTB) = ALL_OFF_OUT_B;
+	io_register(PORTC) = ALL_OFF_OUT_C;
+	io_register(PORTD) = ALL_OFF_OUT_D;
+}
+
+
+void line(byte patern_data, byte col) {
+	
+	if(col < 5) {
+		io_register(PORTB) = ALL_OFF_OUT_B;
+		io_register(PORTD) = ~(patern_data) & PD_OM;
+		io_register(PORTC) = 1 << col;
+	} else {
+		io_register(PORTB) = ~(patern_data) & PB_OM;
+		io_register(PORTC) = 1 << (col - 5);
+		io_register(PORTD) = ALL_OFF_OUT_D;
+	}
+	
+	/* led bright time busy loop*/
+	byte dead_time = 0;
+	do {
+		dead_time ++;
+		nop();
+	} while (dead_time < 50);
+	clear();
+	dead_time = 0;
+	do {
+		dead_time ++;
+		nop();
+	} while (dead_time < 10);
+}
+
+void put_led_map(Led_Map *data, byte led_pos) {
+	byte cnt,offset;
+	if( led_pos == LED0 ) {
+		offset = 0;
+	} else {
+		offset = 5;
+	}	
+	for(cnt = 0; cnt < 5; cnt++){
+		line(data->col[cnt], offset++);
+	}
+	/* busy loop */
+	byte dead_time = 0;
+	do {
+		dead_time ++;
+	} while (dead_time < 2);
+}
+
+void put_led_map_half(Led_Map_Half *data, byte led_pos) {
+	byte cnt,offset;
+	if ( led_pos == LED0_HALF ) {
+		offset = 0;
+	} else if (led_pos == LED1_HALF){
+		offset = 3;
+	} else if (led_pos == LED2_HALF) {
+		offset = 5;
+	} else {
+		offset = 8;
+	}
+
+	for(cnt = 0; cnt < 2; cnt++){
+		line(data->col[cnt], offset++);
+	}
+}
+
+void put_number(int num) {
+	if((num > 9999) || (num < 0)) {
+		return;
+	}
+//	byte cn[4];
+//	int rm;
+//	rm = num /10;
+//	cn[3] = rm;
+//	rm = rm /10;
+//	cn[2] = rm;
+//	rm = rm /10;
+//	cn[1] = rm;
+//	rm = rm /10;
+//	cn[0] = rm;
+//	put_led_map_half(&num_table[cn[3]], LED0_HALF);
+//	put_led_map_half(&num_table[cn[2]], LED1_HALF);
+//	put_led_map_half(&num_table[cn[1]], LED2_HALF);
+//	put_led_map_half(&num_table[cn[0]], LED3_HALF);
+
+}
+
+
+void copy_led_map(Led_Map *Source_data, Led_Map *Distination_data) {
+	byte cnt;
+	for(cnt = 0;cnt < 5; cnt++) {
+		Distination_data->col[cnt] = Source_data->col[cnt];
+	}
+}
+
+void scan_led_matrix(Led_Matrix * element) {
+	if((element->num <= LED_OFF) || (element->num > LED_ALL) ){
+		return;
+	}
+	if((element->num == LED0) || (element->num == LED_ALL)) {
+		put_led_map(&(element->member[0]), LED0);
+	} 
+	if((element->num == LED1) || (element->num == LED_ALL)) {
+		put_led_map(&(element->member[1]), LED1);
+	}
+	return;
+}
+
+void flow_dot(word utim_num){
+	byte loop_x,loop_y;
+	byte ret_val;
+	ret_val = start_utimer(utim_num);
+	do {
+		for( loop_y = 0; loop_y < 7; loop_y++) {
+			for( loop_x = 0; loop_x < 10; loop_x++){
+				pset(loop_x, loop_y);
+				wait_1m();
+			}
+		}
+	} while(check_running_utimer(utim_num));
+}
+
+
+void read_eeprom_led_map(Led_Map *eeprom_data, Led_Map *distination_data) {
+	distination_data->col[0] = EEPROM_read((word)  &(eeprom_data->col[0]));
+	distination_data->col[1] = EEPROM_read((word)  &(eeprom_data->col[1]));
+	distination_data->col[2] = EEPROM_read((word)  &(eeprom_data->col[2]));
+	distination_data->col[3] = EEPROM_read((word)  &(eeprom_data->col[3]));
+	distination_data->col[4] = EEPROM_read((word)  &(eeprom_data->col[4]));
+}	
+
+
+void EEPROM_write(word addr, byte data){
+	/* Wait for completion of previous write */
+	while(io_register(EECR) & (1 << EEPE))
+		;
+	/* Set up address and Data Registers */
+	io_register(EEAR)   = (byte) addr;
+	io_register(EEAR+1) = (byte) ((0xff00) & addr) >> 8;
+	/* Start eeprom read by writing EERE */
+	io_register(EEDR) = data;
+	cli();
+	/* Writelogical one to EEMPE */
+	io_register(EECR) |= (1 << EEMPE);
+	/* Start eeprom write by setting EEPE */
+	io_register(EECR) |= (1 << EEPE);
+	sei();
+}
+
+byte EEPROM_read(word addr) {
+	/* Wait for completion of previous write */
+	while( io_register(EECR) & (1 << EEPE))
+		;
+
+	/* Set up address register */
+	io_register(EEAR)   = (byte) addr;
+	io_register(EEAR+1) = (byte) ((0xff00) & addr) >> 8;
+	/* Start eeprom read by writing EERE */
+	io_register(EECR) |= (1 << EERE);
+	/* Return data from Data Register */
+	return io_register(EEDR);
+}
+
+
+
+
+/*
+ * sram static values
+ */
+
+
+
+
+/* interrupt handlers */
+void int_TIM0_OVF(void){
+	io_register(TCNT0) = T0_OVF; /* set Overflow count */
+	sys_clk1++;
+	sys_clk0++;
+	sys_clk0 = sys_clk0 & 0x7fff;
+	//volatile byte temp = io_register(PORTC);
+	//temp = ~temp;
+	//io_register(PORTC) = temp;
+//	wait_5m();
+//	wait_5m();
+//	wait_5m();
+	count_utimer();
+}
+
+
+/* no use */
+/*
+void int_EE_RDY(void){
+	asm("rjmp RESET");
+}
+void int_INT0(void){
+	asm("rjmp RESET");
+}
+void int_PCINT1(void){
+	asm("rjmp RESET");
+}
+void int_EE_RDY(void){
+	asm("rjmp RESET");
+}
+void int_ANA_COMP(void){
+	asm("rjmp RESET");
+}
+void int_TIM0_COMPA(void){
+	asm("rjmp RESET");
+}
+void int_TIM0_COMPB(void){
+	asm("rjmp RESET");
+}
+void int_WDT(void){
+	asm("rjmp RESET");
+}
+void int_ADC(void){
+	asm("rjmp RESET");
+}
+*/

@@ -1,0 +1,496 @@
+/*
+ *  avr_main.c
+ *  device = ATmega88
+ *
+ *  used interrupts
+ *  TIM0
+ *  
+ *  coded by H.Takenobu
+ *  2011.04.16 rev.0
+ *
+ */
+
+
+#include "m88def.h"
+#include "avr.h"
+#include "avr_main.h"
+/* 
+ * user defined constant
+ */
+#define BLINK_T 50 		// LED Blink cycle 0.5sec
+#define SW_INPUT_T 3		// Switch input cycle
+#define TICK_60s 600		// 60s count
+
+#define SW_ALL_IN     0x18	// 0001 l000 
+#define ALL_OFF_OUT	0x00	// 0000 0000
+#define ALL_OFF_OUT_B	0x7f	// 0111 1111
+#define	ALL_OFF_OUT_C	0x00	// 0000 0000
+#define ALL_OFF_OUT_D	0x7f	// 0111 1111
+/*
+ * user defined functions
+ */
+#define INIT 	0x00
+#define SLEEP	0x01
+#define RISE	0x02
+#define ACTIVE	0x04
+
+#define SW01			0x01
+#define SW02			0x02
+#define SW03			0x03
+#define SW04			0x00
+#define SW_SHIFT_ALIGNED	0x03
+#define SW_ALL_OFF		0x00
+
+#define LED_ON	0xfb		// 1111 1011
+#define LED_OFF 0xff		// 1111 1111
+
+#define INTERVAL_00	0	//  0sec
+#define INTERVAL_01	300	//  3sec
+#define INTERVAL_02	1000	// 10sec
+#define INTERVAL_03	6000	// 60sec
+//#define INTERVAL_04	60000	// 60sec
+#define INTERVAL_10	1	//  1min
+#define INTERVAL_20	5	//  5min
+#define	INTERVAL_30	10	// 10min
+#define INTERVAL_40	60	// 60min
+
+
+
+typedef volatile struct user_timer_status_bitset {
+	word run 		: 1;		// timer running flag			r/w
+	word reserve0		: 1;		// reserve  flag			r/w
+	word countup		: 1;		// timer countup flag			r/w
+	word reserve1		: 5;		// reserve area
+	word auto_restart	: 1;		// timer auto restart flag		r/w
+	word reserve2		: 7;		// reserve area
+} User_Timer_Status_Bitset;
+
+typedef volatile union user_timer_status {
+	User_Timer_Status_Bitset bitset;
+	word flags;
+} User_Timer_Status;
+
+typedef volatile struct user_timer_element {
+	User_Timer_Status status;
+	word count;
+	word set_value;
+} User_Timer_Element;
+
+enum user_timer_number {UTIM0, UTIM1, UTIM2, UTIM3, UTIM4};
+#define MAX_USER_TIMER_NUMBER	(UTIM4 + 1)	// Timer_Element number
+#define UTIM_RUN	0
+#define UTIM_CNTUP	2
+#define UTIM_AUTOSTART	8
+
+#define UTIM_RETVAL_RUN		1
+#define UTIM_RETVAL_STOP	0
+#define UTIM_RETVAL_NG		0
+#define UTIM_RETVAL_OK		1	
+
+/*
+ * interrupt handlers
+ */
+extern void int_RESET(void) NAKED;
+void int_TIM0_OVF(void) SIGNAL_INT;
+
+/*
+ * sub routines
+ */
+
+void init_timer(void) NAKED;
+void init_port(void) NAKED;
+void init_parameter(void) NAKED;
+
+
+extern void delay(word);
+void blink_led(byte, word);
+
+
+void pset(byte, byte);
+void clear(void);
+
+byte start_utimer(word utim_num);
+byte stop_utimer(word utim_num);
+byte restart_utimer(word utim_num);
+byte set_utimer(word utim_num, word set_count);
+byte check_running_utimer(word utim_num);
+byte set_autostart_utimer(word utim_num);
+byte reset_autostart_utimer(word utim_num);
+void count_utimer(void);
+void read_utimer(word utim_num);
+
+
+
+
+/*
+ * sram static values
+ */
+
+
+volatile word sys_clk0;
+volatile word sys_clk1;			/* main system clock : 10ms */
+static byte state;
+word nw_count;
+volatile byte test_bb;
+
+
+User_Timer_Element utim_table[MAX_USER_TIMER_NUMBER];
+
+
+/* .eeprom section data */
+// no data
+
+/* .text section data */
+//extern byte test_data[];	/* allocate to the other place */ 
+
+
+
+/* main routine for avr */
+void app_main(void){
+	cli();
+	io_register(SPH) 	= (RAMEND & 0xff00) >> 8;	/* set the Stack Pointer */
+	io_register(SPL) 	= (RAMEND & 0x0ff);
+	init_timer();
+	init_port();
+	init_parameter();
+
+	nop();
+	nop();
+	nop();
+
+
+
+	/* test routine */
+	io_register(PORTB) = 0x00;
+	io_register(PORTC) = 0x00;
+	io_register(PORTD) = 0x00;
+	wait_5m();
+	wait_5m();
+	wait_5m();
+	io_register(PORTB) = 0xff;
+	io_register(PORTC) = 0x1f;
+	io_register(PORTD) = 0xff;
+	wait_5m();
+	wait_5m();
+	wait_5m();
+	io_register(PORTB) = 0x00;
+	io_register(PORTC) = 0x00;
+	io_register(PORTD) = 0x00;
+	
+	/* enable interrupt */
+	sei();
+
+	volatile byte ret_val;	
+
+	ret_val = set_utimer(UTIM0, 100);
+	ret_val = set_utimer(UTIM1, 200);
+	ret_val = set_utimer(UTIM2, 300);
+	ret_val = set_utimer(UTIM3, 400);
+	ret_val = set_utimer(UTIM4, 500);
+	
+	while(1){
+		ret_val = start_utimer(UTIM0);
+		while(1) {
+			ret_val = check_running_utimer(UTIM0);
+			if(ret_val != UTIM_RETVAL_RUN) {
+				break;
+			}
+			ret_val = (byte) ((sys_clk0) & 0xff);
+			io_register(PORTB) = ret_val;
+			//ret_val = (byte) ((sys_clk1) & 0xff00) >> 8;
+		}
+
+		io_register(PORTB) = 0xaa;
+		ret_val = start_utimer(UTIM1);
+		while(1) {
+			ret_val = check_running_utimer(UTIM1);
+			if(ret_val != UTIM_RETVAL_RUN) {
+				break;
+			}
+			io_register(PORTB) = ~io_register(PORTB);
+			wait_5m();
+			
+		}
+
+		ret_val = start_utimer(UTIM2);
+		while(1) {
+			ret_val = check_running_utimer(UTIM2);
+			if(ret_val != UTIM_RETVAL_RUN) {
+				break;
+			}
+			//ret_val = (byte) ((sys_clk0) & 0xff);
+			ret_val = (byte) (((sys_clk1) & 0xff00) >> 8);
+			io_register(PORTB) = ret_val;
+		}
+
+		ret_val = start_utimer(UTIM3);
+		while(1) {
+			ret_val = check_running_utimer(UTIM3);
+			if(ret_val != UTIM_RETVAL_RUN) {
+				break;
+			}
+			ret_val = (byte) ((sys_clk0) & 0xff);
+			io_register(PORTB) = ret_val;
+		}
+
+		io_register(PORTB) = 0x1;
+		ret_val = start_utimer(UTIM4);
+		byte dir_bit = 0;
+		while(1) {
+			ret_val = check_running_utimer(UTIM4);
+			if(ret_val != UTIM_RETVAL_RUN) {
+				break;
+			}
+			if( dir_bit == 0) {	
+				io_register(PORTB) = io_register(PORTB) << 1;
+			} else {
+				io_register(PORTB) = io_register(PORTB) >> 1;
+			}
+			if( io_register(PORTB) >= 0x80 ) {
+				dir_bit = 1;
+			} else if ( io_register(PORTB) == 0x01 ) {
+				dir_bit = 0;
+			}
+			wait_1m();
+		}
+
+	
+
+	}
+	/* end of main routine */
+}
+/* follows are Sub routine */
+
+#define CLK_PR 0x00		// clock prescalse register
+#define CLK_PE 0x80		// clock prescalse change enable
+#define T0_OVF -9		// Timer 0 overflow value -> 10mS
+void init_timer(void)  {
+	/* default clock used */
+	/* internal RC oscillator at 8.0 MHz */
+	/* with the fuse CKDIV8 programmed */
+	/* this means, resulting in 1.0 MHz system clock :-) */
+
+	/* clock prescaler initialize */
+	io_register(CLKPR)  = CLK_PE;
+	io_register(CLKPR)  = CLK_PR;
+	io_register(TCCR0A) = NULL;
+	io_register(TCCR0B) = (1 << CS02) | (1 << CS00);	/* set prescaler 1/1024 */
+	io_register(TCNT0)  = T0_OVF;				/* set Overflow count */
+	/* set Timer Overflow Interrupt Enable */
+	io_register(TIMSK0) = (1 << TOIE0);
+	ret();
+}
+
+#define PB_OM  0x7f		// 0111 1111 Port B output bit mask
+#define PB_PULLUP 0x80		// 1000 0000 Port B input pull-up bit and 
+				// 	     Port B source output
+#define PC_OM  0x1f		// 0001 1111 Port C output bit mask
+#define PC_PULLUP 0x3f		// 0011 1111 Port C input pull-up bit and 
+				// 	     Port C source output
+#define PD_OM  0x7f		// 0111 1111 Port D output bit mask
+#define PD_PULLUP 0x80		// 1000 0000 Port D input pull-up bit and 
+// 	     Port D source output
+void init_port(void) {
+	io_register(DDRB)  = PB_OM;
+	io_register(PORTB) = PB_PULLUP;
+	nop();
+	io_register(DDRC)  = PC_OM;
+	io_register(PORTC) = PC_PULLUP;
+	nop();
+	io_register(DDRD)  = PD_OM;
+	io_register(PORTD) = PD_PULLUP;
+	nop();
+	ret();
+}
+
+void init_parameter(void) {
+	state = INIT;
+	sys_clk0 = 0;
+	sys_clk1 = 0;
+	io_register(PORTB) = ALL_OFF_OUT;
+	io_register(PORTC) = ALL_OFF_OUT;
+	io_register(PORTD) = ALL_OFF_OUT;
+	ret();
+}	
+
+byte start_utimer(word utim_num) {
+	if((utim_num < 0) || (utim_num >= MAX_USER_TIMER_NUMBER)) {
+		return UTIM_RETVAL_NG;
+	}
+	cli();
+	volatile User_Timer_Element *utim_ptr;
+	utim_ptr = &utim_table[utim_num];
+	utim_ptr->count = (utim_ptr->set_value + sys_clk0) & 0x7fff;
+	utim_ptr->status.flags |= (1 << UTIM_RUN);
+	sei();	
+	return UTIM_RETVAL_OK;
+}
+
+byte stop_utimer(word utim_num){
+	if((utim_num < 0) || (utim_num >= MAX_USER_TIMER_NUMBER)) {
+		return UTIM_RETVAL_NG;
+	}
+	volatile User_Timer_Element *utim_ptr;
+	utim_ptr = &utim_table[utim_num];
+	utim_ptr->status.flags &= ~((1 << UTIM_RUN) | (1 << UTIM_CNTUP));
+	return UTIM_RETVAL_OK;
+}
+
+byte restart_utimer(word utim_num){
+	if((utim_num < 0) || (utim_num >= MAX_USER_TIMER_NUMBER)) {
+		return UTIM_RETVAL_NG;
+	}
+	volatile User_Timer_Element *utim_ptr;
+	utim_ptr = &utim_table[utim_num];
+	utim_ptr->count = (utim_ptr->set_value + sys_clk0) & 0x7fff;
+	utim_ptr->status.flags |= (1 << UTIM_RUN);
+	return UTIM_RETVAL_OK;
+}
+
+byte set_utimer(word utim_num, word set_count) {
+	if((utim_num < 0) || (utim_num >= MAX_USER_TIMER_NUMBER) || ( set_count < 0)) {
+		return UTIM_RETVAL_NG;
+	}
+	volatile User_Timer_Element *utim_ptr;
+	utim_ptr = &utim_table[utim_num];
+	utim_ptr->set_value = set_count;
+	return UTIM_RETVAL_OK;
+}
+
+byte check_running_utimer(word utim_num) {
+	if((utim_num < 0) || (utim_num >= MAX_USER_TIMER_NUMBER)) {
+		return UTIM_RETVAL_NG;	// not assigned
+	}
+	volatile User_Timer_Element *utim_ptr;
+	utim_ptr = &utim_table[utim_num];
+
+	if( utim_ptr->status.flags & (1 << UTIM_RUN)) {
+		return UTIM_RETVAL_RUN;		// user timer is runnnig
+	} else {
+		return UTIM_RETVAL_STOP;	// user timer was stoped
+	}
+}
+
+byte set_autostart_utimer(word utim_num) {
+	if((utim_num < 0) || (utim_num >= MAX_USER_TIMER_NUMBER)) {
+		return UTIM_RETVAL_NG;
+	}
+	volatile User_Timer_Element *utim_ptr;
+	utim_ptr = &utim_table[utim_num];
+	utim_ptr->status.flags |= (1 << UTIM_AUTOSTART);
+	return UTIM_RETVAL_OK;
+}
+
+byte reset_autostart_utimer(word utim_num) {
+	if((utim_num < 0) || (utim_num >= MAX_USER_TIMER_NUMBER)) {
+		return UTIM_RETVAL_NG;
+	}
+	volatile User_Timer_Element *utim_ptr;
+	utim_ptr = &utim_table[utim_num];
+	utim_ptr->status.flags &= ~(1 << UTIM_AUTOSTART);
+	return UTIM_RETVAL_OK;
+}
+
+void count_utimer(void) {
+ 	volatile User_Timer_Element *utim_ptr;
+	word utim_num;
+	for(utim_num = 0; utim_num < MAX_USER_TIMER_NUMBER; utim_num++) {
+		utim_ptr = &utim_table[utim_num];
+		if(utim_ptr->status.flags & (1 << UTIM_RUN)) {
+			/* timer countup */
+			if(utim_ptr->count == sys_clk0) {
+				utim_ptr->status.flags |= (1 << UTIM_CNTUP);
+				if(utim_ptr->status.flags & (1 << UTIM_AUTOSTART)) {
+					restart_utimer(utim_num);
+				} else {
+					stop_utimer(utim_num);
+				}
+			}
+		}
+	}
+}
+
+void pset0(byte x, byte y) {
+	/* set point on led matrix No.0 */
+	io_register(PORTB) = ~(1 << y);
+	io_register(PORTC) = 1 << x;
+	io_register(PORTD) = ALL_OFF_OUT_D;
+}
+
+void pset1(byte x, byte y) {
+	/* set point on led matrix No.1 */
+	io_register(PORTB) = ALL_OFF_OUT_B;
+	if( x < 5 ) {
+		x = 5;
+	}
+	io_register(PORTC) = 1 << (x - 5);
+	io_register(PORTD) = ~(1 << y);
+}
+
+void pset(byte x, byte y) {
+	/* set point on led matrix array */
+	if( x < 5 ) {
+		pset0(x, y);
+	} else {
+		pset1(x, y);
+	}
+}
+
+void clear(void) {
+	io_register(PORTB) = ALL_OFF_OUT_B;
+	io_register(PORTC) = ALL_OFF_OUT_C;
+	io_register(PORTD) = ALL_OFF_OUT_D;
+}
+
+
+
+
+
+
+
+/* interrupt handlers */
+void int_TIM0_OVF(void){
+	io_register(TCNT0) = T0_OVF; /* set Overflow count */
+	sys_clk1++;
+	sys_clk0++;
+	sys_clk0 = sys_clk0 & 0x7fff;
+	//volatile byte temp = io_register(PORTC);
+	//temp = ~temp;
+	//io_register(PORTC) = temp;
+//	wait_5m();
+//	wait_5m();
+//	wait_5m();
+	count_utimer();
+}
+
+
+/* no use */
+/*
+void int_EE_RDY(void){
+	asm("rjmp RESET");
+}
+void int_INT0(void){
+	asm("rjmp RESET");
+}
+void int_PCINT1(void){
+	asm("rjmp RESET");
+}
+void int_EE_RDY(void){
+	asm("rjmp RESET");
+}
+void int_ANA_COMP(void){
+	asm("rjmp RESET");
+}
+void int_TIM0_COMPA(void){
+	asm("rjmp RESET");
+}
+void int_TIM0_COMPB(void){
+	asm("rjmp RESET");
+}
+void int_WDT(void){
+	asm("rjmp RESET");
+}
+void int_ADC(void){
+	asm("rjmp RESET");
+}
+*/

@@ -1,0 +1,14 @@
+
+
+
+int main(void)
+{
+
+	volatile char a = 0x11;
+	volatile char b = 0x01;
+	static char buf[] = {0x30,0x31,0x32,0x46,0x47,0x48};
+
+	a = b + 1;
+
+	return 0;
+}

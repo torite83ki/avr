@@ -1,0 +1,563 @@
+/*
+ *
+ *  avr_main2.c
+ *   int0,1 : interrupt
+ *   serial data output 
+ *   puts_avr function
+ *   btohex function test
+ *   serial data input
+ *   txb fifo data buffer
+ *   eeprom read function
+ *
+ *
+ *
+ *  used interrupts
+ *  TIM0
+ *  
+ *  coded by H.Takenobu
+ *  2008.3.30 rev.0
+ *
+ */
+
+
+#include "2313def.h"
+#include "avr.h"
+
+#ifdef DEBUG
+#include "avr_func.h"
+#endif /* DEBUG */
+
+/* 
+ * user defined constant
+ */
+#define CLKPR 0x26	// clock prescalse register
+#define CLK_P 0x00	// clock prescalse value
+#define CLK_PE 0x80	// clock prescalse change enable
+
+#define T0_OVF 0xd9	// Timer 0 overflow value
+#define PB_OM  0x05	// 0000 0101 Port B output bit mask
+#define PD_OM  0x60	// 0110 0000 Port D output bit mask
+
+#define TF_1ms		0	// 1 m second timer flag = 0 bit
+#define TF_10ms		1	// 10 m second timer flag = 1 bit
+#define TF_100ms	2	// 100 m second timer flag = 2 bit
+#define TF_1s		3	// 1 second timer flag = 3 bit
+#define TF_1min		4	// 1 minute timer flag = 4 bit
+#define TF_1h		5	// 1 hour timer flag = 5 bit
+#define TF_1d		6	// 1 day timer flag = 6 bit
+#define TF_1m		7	// 1 month timer flag = 7 bit
+
+#define BAUD_P	0x40	// Constant for UART Baud Rate Register 
+
+#define FIFO_MAX	8		/* FIFO Buffer Length */
+
+#define BLINK_T 500 		// LED Blink cycle
+#define BLINK_T2 50		// LCD Blink cycle
+#define LED_MSK	0x04
+
+#define SW_0	      2		// switch 1
+//#define SW_1	      3		// switch 2 not asigned
+//#define SW_2	      4		// switch 3 not asigned
+#define SW_ALL_IN     0x04	// 0000 0100 
+
+#define PWR_ON	0x01		// Power on 
+#define PWR_OFF	0x00		// Power off
+#define SW_DLY	0x0a		// input delay
+
+
+/*
+ * user defined functions
+ */
+void interrupt_ini(void) NAKED;
+void timer_ini(void) NAKED;
+void port_ini(void) NAKED;
+void parameter_ini(void) NAKED;
+
+void uart_ini(void) NAKED;
+void putc(byte c) NAKED;
+void puts_avr(byte string[]) NAKED;
+void btohex(byte ch[]);
+void read_byte_eeprom(byte *eeprom_addr, byte *ret_data) NAKED;
+void read_block_eeprom(byte *addr, byte ret_block[]);
+
+/*
+ * interrupt handlers
+ */
+extern void reset(void) NAKED;
+void int_INT0(void) SIGNAL_INT;
+void int_INT1(void) SIGNAL_INT;
+void int_TIM1_CAPT1(void) NAKED;
+void int_TIM1_COMP1(void) NAKED;
+void int_TIM1_OVF1(void) NAKED;
+void int_TIM0_OVF0(void) SIGNAL_INT;
+void int_UART_RX(void) SIGNAL_INT;
+void int_UART_UDRE(void) NAKED;
+void int_UART_TX(void) NAKED;
+void int_ANA_COMP(void) NAKED;
+
+/*
+ * sram static values
+ */
+static byte tf;		/* timer flag */
+
+static byte output_data;	/* output data for pio */
+static byte mess_buf[32];
+static long int sys_clk;
+static byte rxb;		/* receive data from sio */
+static byte txb[FIFO_MAX];		/* transmittl data fifo buffer */
+static byte *f_read;		/* FIFO read pointer */
+static byte *f_write;		/* FIFO write pointer */
+static byte *f_top;		/* FIFO top address */
+static byte *f_end;		/* FIFO end address */
+
+static long int blink_cyc;
+static byte blink_cyc2;
+static long int blink_t;		/* blink count */
+//static byte pb_out;		/* portb output data */
+//static byte pd_out;		/* portd output data */
+static byte sw_input_buf;
+static byte sw_input_buf2;
+static byte sw_input;		/* switch input */
+static byte sw_input_pre;		/* pre switch input */
+static byte input_delay;	/* input delay */
+static byte pwr;		/* power state */
+
+/* .eeprom section data */
+byte mess_dec[] EEPROM = "0123456789";
+byte mess_hex[] EEPROM = "0123456789abcdef";
+byte mess_HEX[] EEPROM = "0123456789ABCDEF";
+byte mess_char[] EEPROM = "abcdefghijklmnopqrstuvwxyz";
+byte mess_hello[] EEPROM = "Hello, AVR world!!";
+byte mess_hello2[] EEPROM = "Hello,world! ^_^";
+//byte mess_scan[] EEPROM = "scan time = ";
+//byte mess_count[] EEPROM = "count ";
+//byte mess_crlf[] EEPROM = "\r\n";
+//byte mess_read[] EEPROM = "read ";
+//byte mess_else[] EEPROM = "else ";
+
+/* main routine for avr */
+int main(void){
+	byte m, n;		
+	byte lcd_addr;
+
+	/* disable interrupt */
+	cli();
+	/* initialize register, io port, timer0 */
+	port_ini();
+	output_data = 0xff;
+	parameter_ini();
+	
+	interrupt_ini();
+	timer_ini();
+
+	/* test function */
+	
+	/* enable interrupt */
+	sei();
+	m = 0;
+	lcd_addr = 0;
+	n = 0;
+
+	/* main loop */
+	while(1)
+	{
+		/* check switch input */
+		//sw_input = io_register(PIND);
+		//sw_input = sw_input & SW_ALL_IN;
+
+	//	if(sw_input == SW_ALL_IN){
+	//		sw_input_pre = SW_ALL_IN;
+	//	} else if(sw_input != sw_input_pre){
+	//		/* It changed sw input state. */
+	//		sw_input_pre = sw_input;
+	//		sw_input = sw_input ^ SW_ALL_IN;
+	//		if(sw_input == ( 1 << SW_0)){
+	//			if(blink_t == 100)
+	//				blink_t = 500;
+	//			else
+	//				blink_t = 100;
+	//		}
+	//	}
+		if(sw_input == (1 << SW_0)){
+			blink_t = 100;
+			pwr = PWR_OFF;
+		}else {
+			blink_t = 500;
+			pwr = PWR_ON;
+		}
+	
+		if( (byte) sys_clk == blink_cyc2){
+			blink_cyc2 = (byte) sys_clk + BLINK_T2;
+		}
+
+		/* port output */
+		if( sys_clk == blink_cyc){
+			blink_cyc = sys_clk + blink_t;
+			//blink_cyc = sys_clk + BLINK_T;
+			output_data = ~output_data;
+		}
+		io_register(PORTB) = (pwr | (output_data & LED_MSK)) & PB_OM;
+	}
+	/* end of main routine */
+	return 0;
+}
+
+/* follows are Sub routine */
+
+
+
+
+/* read block data from eeprom
+ *
+ * input	byte* addr 		: eeprom address
+ * output	byte ret_block[]	: return value array
+ *
+ */
+void read_block_eeprom(byte *addr, byte ret_block[]){
+	byte buf = 0;
+	while(1){
+		read_byte_eeprom(addr++, &buf);
+		*(ret_block++) = buf;
+		if(buf == '\0')
+			break;
+		else if (addr >= (byte*) EEPROM_ADR )
+			break;
+	}
+}
+
+
+
+/* byte data to Ascii Hex format
+ *
+ * input 	byte *ch : byte data(ch[0])
+ * output 	byte *ch : byte data(ch[0],ch[1])
+ *
+ */
+/* void btohex(byte ch[]){
+	byte n;
+	byte str[2];
+	byte *ps;
+	
+	ps = ch;
+	for(n=0;n< (sizeof(byte) + 1);n++){
+		if(n == 0){
+			str[0] = *ps & 0x0f;
+		} else {
+			str[1] = str[0];
+			str[0] = *ps >> 4;
+		}
+		if((str[0] <= 9 ) && (str[0] >= 0)){
+			str[0] = str[0] + '0';
+		} else {
+			str[0] = str[0] + 0x37;
+		}
+	}
+	*ps = str[0];
+	*(ps+1) = str[1];
+} 
+*/
+
+/* putc : send char data from serial port */ 
+void puts_avr(byte string[]){
+	while(*string != '\0')
+		putc(*(string++));
+	ret();
+}
+
+void uart_ini(void){
+	io_register(UBRR) = BAUD_P;
+	io_register(UCR) = (1 << TXEN) | (1 << RXEN) | (1 << RXCIE);
+	ret();
+}
+
+
+void interrupt_ini(void){
+	/*
+	 * General interrupt Initialize
+	 *
+	 *  GIMSK register
+	 *  7 6 5 4 3 2 1 0	
+	 *  | |
+	 *  | +----------------- INT0
+	 *  +------------------- INT1
+	 */
+	//io_register(GIMSK) = (1<<INT1) | (1<<INT0);
+	io_register(GIMSK) = NULL;
+	/* low level trigger */
+	io_register(MCUCR) = 0x00;
+	ret();
+}	
+
+void timer_ini(void){
+/**************************************
+ * Timer/Counter0 Initialize
+ * TCCR0	: Timer/Counter0 control register
+ * TCNT0	: countting value setting
+ *
+ * 
+ * Timer/Counter0 control register : TCCR0
+ *  7 6 5 4 3 2 1 0 : bit
+ *  * * * * * | | |
+ *            | | +- CS0
+ *            | +--- CS1
+ *            +----- CS2
+ *
+ * CS0,1,2 are defined in 2313def.h file.
+ *  CS	|  CS2	|  CS1	|  CS0	| Description
+ *  ----+-------+-------+-------+---------
+ *  	|   0	|   0	|   0	| Stop, the Timer/Counter0 is stopped.
+ *  	+-------+-------+-------+---------
+ *  	|   0	|   0	|   1	| CK
+ *  	+-------+-------+-------+---------
+ *  	|   0	|   1	|   0	| CK/8
+ *  	+-------+-------+-------+---------
+ *  	|   0	|   1	|   1	| CK/64
+ *  	+-------+-------+-------+---------
+ *  	|   1	|   0	|   0	| CK/256
+ *  	+-------+-------+-------+---------
+ *  	|   1	|   0	|   1	| CK/1024
+ *  	+-------+-------+-------+---------
+ *  	|   1	|   1	|   0	| External Pin T0, falling edge
+ *  	+-------+-------+-------+---------
+ *  	|   1	|   1	|   1	| External Pin To, rising edge
+ *  	+-------+-------+-------+---------
+ *
+ * 
+ * timer0 set for about 1m Sec timer
+ * clock = 10.000 MHz
+ * 10.000 MHz * (1/256) = 39.0625 kHz
+ * 1 / 39.0625 kHz = 25.6 uSec
+ * 39 * 25.6 uSec = 0.9984 mSec
+ * 256 - 39 = 217 (0xd9)
+ * -> TCCR0 = 0x04
+ * -> TCNT0 = 0xd9
+ *
+ * clock = 8.000 MHz
+ * 1 / 8.000 MHz = 	0.125 uSec
+ * 8 / 8.000 MHz = 	1.000 uSec
+ * 16 / 8.000 MHz =	2.000 uSec
+ * 64 / 8.000 MHz = 	8.000 uSec
+ * 256 / 8.000 MHz =	32.00 uSec
+ * 1024 / 8.000 MHz = 	128.0 uSec
+ *
+ *
+ * Timer/Counter1 Initialize
+ * TCCR1A:	mode setting
+ * TCCR1B:	clock setting
+ * TCNT1H, L:	countting value setting
+ * OCR1AH, L:	compare value setting
+ *
+ * TCCR1A:
+ *  7 6 5 4 3 2 1 0 : bit
+ *  | | * * * * | +-- PWM10
+ *  | |         +---- PWM11
+ *  | +-------------- COM1A0
+ *  +---------------- COM1A1
+ *
+ * COM1A0,1 are defined in 2313def.h file.
+ *  	| COM1A1| COM1A0| Descrption
+ *  ----+-------+-------+---------
+ *  	|   0	|   0	| Timer/Counter1 disconnected from output pin OC1
+ *  	+-------+-------+---------
+ *  	|   0	|   1	| Toggle the OC1 output line.
+ *  	+-------+-------+---------
+ *  	|   1	|   0	| Clear the OC1 output line (to zero).
+ *  	+-------+-------+---------
+ *  	|   1	|   1	| Set the OC1 output line (to one).
+ *  	+-------+-------+---------
+ *
+ * 
+ * PWM10,11 are defined in 2313def.h file.
+ *  	| PWM11 | PWM10 | Description
+ *  ----+-------+-------+---------
+ *  	|   0	|   0	| PWM operation of Timer/Counter1 is disabled
+ *  	+-------+-------+---------
+ *  	|   0	|   1	| Timer/Counter1 is an 8-bit PWM
+ *  	+-------+-------+---------
+ *  	|   1	|   0	| Timer/Counter1 is a 9-bit PWM
+ *  	+-------+-------+---------
+ *  	|   1	|   1	| Timer/Counter1 is a 10-bit PWM
+ *  	+-------+-------+---------
+ *
+ *
+ * On the  PWM mode, COM1A0,1 bits are different function as follows  
+ * COM1A0,1 are defined in 2313def.h file.
+ *  	| COM1A1| COM1A0| Effect on OC1
+ *  ----+-------+-------+---------
+ *  	|   0	|   0	| Not connected
+ *  	+-------+-------+---------
+ *  	|   0	|   1	| Not connected
+ *  	+-------+-------+---------
+ *  	|   1	|   0	| Cleard on compare match, up-counting.
+ *  	|	|	| Set on compare match, down-counting
+ *  	|	|	| (non-inverted PWM).
+ *  	+-------+-------+---------
+ *  	|   1	|   1	| Cleard on compare match, down-counting,
+ *  	|	|	| Set on compare match, up-counting
+ *  	|	|	| (inverted PWM).
+ *  	+-------+-------+---------
+ *  	
+ * TCCR1B:
+ *  7 6 5 4 3 2 1 0 : bit
+ *  | | * * | | | +-- CS10
+ *  | |     | | +---- CS11
+ *  | |     | +------ CS12
+ *  | |     +-------- CTC1
+ *  | +-------------- ICES1
+ *  +---------------- ICNC1
+ *
+ * ICES1,ICNC1 are defined in 2313def.h file.
+ *  ICNC1	: Input Capture1 Noise Canceler(4 CKs)
+ *  ICES1	: Input Capture1 Edge Select
+ *  CTC1	: Clear Timer/Counter1 on Compare Match
+ * 
+ * CS10,11,12 are defined in 2313def.h file.
+ *  CS	|  CS12	|  CS11	|  CS10	| Description
+ *  ----+-------+-------+-------+---------
+ *  	|   0	|   0	|   0	| Stop, the Timer/Counter1 is stopped.
+ *  	+-------+-------+-------+---------
+ *  	|   0	|   0	|   1	| CK
+ *  	+-------+-------+-------+---------
+ *  	|   0	|   1	|   0	| CK/8
+ *  	+-------+-------+-------+---------
+ *  	|   0	|   1	|   1	| CK/64
+ *  	+-------+-------+-------+---------
+ *  	|   1	|   0	|   0	| CK/256
+ *  	+-------+-------+-------+---------
+ *  	|   1	|   0	|   1	| CK/1024
+ *  	+-------+-------+-------+---------
+ *  	|   1	|   1	|   0	| External Pin T1, falling edge
+ *  	+-------+-------+-------+---------
+ *  	|   1	|   1	|   1	| External Pin T1, rising edge
+ *  	+-------+-------+-------+---------
+ *
+ * Timer TOP Values and PWM Frequency
+ *
+ *	| PWM Resolution|    Timer TOP Value	|   Frequency	|
+ *  ----+---------------+-----------------------+---------------+
+ * 	|     8-bit	|	0x00ff(255)	|  f(TC)/510	|
+ *      +---------------+-----------------------+---------------+
+ * 	|     9-bit 	|	0x01ff(511)	|  f(TC)/1022	|
+ *      +---------------+-----------------------+---------------+
+ * 	|    10-bit	|	0x03ff(1023)	|  f(TC)/2046	|
+ *      +---------------+-----------------------+---------------+
+ * 
+ * 
+ * 
+ * 
+ *  
+ ***************************************/
+
+	/* set clock 10 MHz */
+	/* set Timer/Counter0 prescaler 8 */
+	io_register(TCCR0) = (1<<CS02); /* set prescaler 1/256 */
+	io_register(TCNT0) = T0_OVF; /* set Overflow count 100 */
+	//io_register(TCNT0) = 1;
+	
+	/* set PWM mode
+	 * 8-bitPWM 
+	 * set up-counting, clear down-counting
+	 * Timer/Counter1 Prescaler :	 1/1024
+	 * counter value :		 0x00ff = 255 
+	 * compare match value :	 0x7f = 127 
+	 *
+	 * */
+//	io_register(TCCR1A) = (1<<COM1A1) | (1<<PWM10); /* set PWM mode */
+//	io_register(TCCR1B) = (1<<CS12) | (1<<CS10); /* set prescaler 1/1024 */
+//	io_register(TCNT1H) = 0x00; /* set high byte 0x00 */
+//	io_register(TCNT1L) = 0xff; /* set low byte 0xff */
+//	io_register(OCR1AH) = 0x00; /* set high byte */
+//	io_register(OCR1AL) = 0x10; /* set low byte 0x7f */
+
+	/* 
+	 * 
+	 * enable Timer/Counter0 Overflow Interrupt : BIT_TOIE0 = 0x02
+	 * enable Timer/Counter1 Overflow Interrupt : BIT_TOIE1 = 0x80
+	 * 
+	 */	
+	io_register(TIMSK) = (1<<TOIE0);
+	ret();
+}
+
+void port_ini(void){
+	/* PORTB set all output */
+	io_register(DDRB) = PB_OM;
+	/* PORTD PD2,3,4 set input 
+	 *       PD5,6 set output 
+	 */
+	io_register(DDRD) = PD_OM; 
+
+	/* clock prescaler initialize */
+	io_register(CLKPR) = CLK_PE;
+	io_register(CLKPR) = CLK_P;
+
+	ret();
+}
+
+void parameter_ini(void){
+	/* when reset is executed, all sram is cleared by asm routine */
+	/* transmittal fifo buffer initialize */
+	f_top = txb;
+	f_end = txb + FIFO_MAX;
+	f_read = txb;
+	f_write = txb;	
+
+	blink_t = BLINK_T;
+	blink_cyc = sys_clk + blink_t;
+	blink_cyc2 = (byte) sys_clk + BLINK_T2;
+	
+	ret();
+}
+
+/* interrupt handlers */
+void int_TIM0_OVF0(void){
+	io_register(TCNT0) = T0_OVF; /* set Overflow count */
+	sys_clk++;
+	input_delay++;
+	if(input_delay > SW_DLY){
+		input_delay = 0;
+		/* check switch input */
+		sw_input_buf = io_register(PIND);
+		sw_input_buf = sw_input_buf & SW_ALL_IN;
+		if(sw_input_buf == sw_input_buf2)
+			sw_input = sw_input_buf2;
+		sw_input_buf2 = sw_input_buf;
+	}
+}
+void int_INT0(void){
+	asm("rjmp reset");
+}
+void int_INT1(void){
+	asm("rjmp reset");
+}
+void int_TIM1_CAPT1(void){
+	asm("rjmp reset");
+}
+void int_TIM1_COMP1(void){
+	asm("rjmp reset");
+}
+void int_TIM1_OVF1(void){
+	asm("rjmp reset");
+	//io_register(TCNT1H) = 0x03; /* set high byte 0x03 */
+	//io_register(TCNT1L) = 0xE8; /* set low byte 0xE8 */
+}
+void int_UART_RX(void){
+	asm("rjmp reset");
+//	rxb = io_register(UDR);
+//	/* receive data stacks the fifo. */
+//	*(f_write++) = rxb;
+//	if( f_write == f_end){
+//		f_write = f_top;
+//	}
+}
+void int_UART_UDRE(void){
+	asm("rjmp reset");
+}
+void int_UART_TX(void){
+	asm("rjmp reset");
+}
+void int_ANA_COMP(void){
+	asm("rjmp reset");
+}
+
+
